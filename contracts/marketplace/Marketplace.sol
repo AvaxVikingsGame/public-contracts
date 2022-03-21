@@ -50,7 +50,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         uint16 developerRate;
         // The reward manager instance.
         IRewardManager rewardManager;
-        // 
+        // How much to extend auctions by when a bid is placed with less than this much time remaining.
         uint16 bidExtensionTime;
         // The minimum percentage that a bid must increase by (0.1% precision).
         uint16 minBidIncrease;
@@ -243,6 +243,17 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
     );
 
     /**
+     * @notice Emitted when a bid is refunded.
+     * @param listingId The unique identifier for the listing.
+     * @param bidder The address that created the bid.
+     */
+    event BidRefunded(
+        uint256 indexed listingId,
+        address bidder,
+        uint256 amount
+    );
+
+    /**
      * @notice Emitted when an offer is created for a token.
      * @param offerId The unique identifier for the offer.
      * @param token The token that the offer was made for.
@@ -331,7 +342,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         address developerWallet,
         IRewardManager rewardManager
     ) internal onlyInitializing {
-        setSalesRates(20, 30); // 2.0% minter, 3.0% developer
+        setSalesRates(20, 30);
         setValidDurationRange(30 minutes, 14 days);
         setDeveloperWallet(developerWallet);
         setRewardManager(rewardManager);
@@ -562,21 +573,31 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      */
     function buy(
         uint256 listingId
-    ) external payable
+    ) public payable
         whenNotPaused
     {
         Listings.Listing storage listing = _listings.get(listingId);
         require(_msgSender() != listing.seller, "seller cannot buy own listing");
 
+        // Prevent users from buying listings that have already concluded.
+        if (listing.listingType == Listings.ListingType.DutchAuction || listing.listingType == Listings.ListingType.EnglishAuction) {
+            uint256 auctionEndTime = _getAuctionEndTime(listing);
+            require(block.timestamp < auctionEndTime, "auction has concluded");
+        }
+
+        // Gets the buy price for the token.
         uint256 price = _listings.getBuyPrice(listingId);
         require(price != 0, "listing has no buyout price");
         require(msg.value >= price, "not enough paid");
 
-        // Distribute the payment to the seller, minter, and developers.
-        _distributeSalePayment(listing.seller, listing.token.minterOf(listing.tokenId), price);
+        // Refund the highest bidder.
+        _refundHighestBid(listingId, listing);
 
         // Transfer ownership of the token to the buyer.
         listing.token.safeTransferFrom(address(this), _msgSender(), listing.tokenId);
+
+        // Distribute the payment to the seller, minter, and developers.
+        _distributeSalePayment(listing.seller, listing.token.minterOf(listing.tokenId), price);
 
         // Remove the listing from storage
         _listings.removeListing(listingId);
@@ -603,21 +624,25 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         require(_msgSender() != listing.seller, "seller cannot bid on own listing");
         require(listing.listingType == Listings.ListingType.EnglishAuction, "can only bid on English auctions");
 
+        // The bidder has paid at least the buyout price, so buy instead of bidding.
+        if (listing.buyoutOrEndingPrice != 0 && msg.value >= listing.buyoutOrEndingPrice) {
+            buy(listingId);
+            return;
+        }
+
         // Pausing the contract will extend the auction duration by the length of time that the contract was paused.
-        uint256 auctionEndTime = listing.createdAt + listing.duration - (_pauseMetrics.totalDuration - listing.pauseDurationAtCreation);
+        uint256 auctionEndTime = _getAuctionEndTime(listing);
         require(block.timestamp < auctionEndTime, "auction has concluded");
 
         // Calculate the minimum required bid.
         uint256 minAcceptedBid = listing.startingPrice;
         if (listing.highestBidder != address(0)) {
-            minAcceptedBid = (listing.highestBid * _config.minBidIncrease) / PRECISION_SCALAR;
+            minAcceptedBid = listing.highestBid + ((listing.highestBid * _config.minBidIncrease) / PRECISION_SCALAR);
         }
         require(msg.value >= minAcceptedBid, "bid is too low");
 
         // Refund the previous highest bidder.
-        if (listing.highestBidder != address(0)) {
-            _config.rewardManager.depositPersonalReward{value: listing.highestBid}(listing.highestBidder);
-        }
+        _refundHighestBid(listingId, listing);
 
         // Write the new bidder to storage.
         listing.highestBidder = _msgSender();
@@ -625,6 +650,42 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
 
         // Notify the world that a bid was placed.
         emit BidCreated(listingId, _msgSender(), msg.value);
+    }
+
+    /**
+     * @notice Concludes an auction that has run its duration.
+     * @param listingId The id of the listing to conclude.
+     */
+    function concludeAuction(
+        uint256 listingId
+    ) external
+        whenNotPaused
+    {
+        Listings.Listing storage listing = _listings.get(listingId);
+        require(listing.listingType == Listings.ListingType.EnglishAuction, "can only conclude English auctions");
+
+        uint256 auctionEndTime = _getAuctionEndTime(listing);
+        require(block.timestamp >= auctionEndTime, "auction has not concluded");
+
+        if (listing.highestBidder == address(0)) {
+            // Auction had no bidders, so return the token to the seller.
+            listing.token.safeTransferFrom(address(this), listing.seller, listing.tokenId);
+
+            // Notify the world that the auction failed.
+            emit ListingCancelled(listingId);
+        } else {
+            // Transfer ownership of the token to the buyer.
+            listing.token.safeTransferFrom(address(this), listing.highestBidder, listing.tokenId);
+            
+            // Distribute payment to the seller, minter, and developers.
+            _distributeSalePayment(listing.seller, listing.token.minterOf(listing.tokenId), listing.highestBid);
+
+            // Notify the world that the auction was successful.
+            emit ListingSuccessful(listingId, listing.highestBidder, listing.highestBid);
+        }
+
+        // Remove the listing from storage.
+        _listings.removeListing(listingId);
     }
 
     /**
@@ -684,11 +745,11 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         Offers.Offer storage offer = _offers.get(offerId);
         require(_msgSender() == offer.token.ownerOf(offer.tokenId), "only token owner can accept offer");
 
-        // Distribute payment to the seller, minter, and developers.
-        _distributeSalePayment(_msgSender(), offer.token.minterOf(offer.tokenId), offer.amount);
-
         // Transfer the token to the offerer.
         offer.token.safeTransferFrom(_msgSender(), offer.offerer, offer.tokenId);
+
+        // Distribute payment to the seller, minter, and developers.
+        _distributeSalePayment(_msgSender(), offer.token.minterOf(offer.tokenId), offer.amount);
 
         // Remove the offer from storage.
         _offers.removeOffer(offerId);
@@ -709,15 +770,11 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         Offers.Offer storage offer = _offers.get(offerId);
         require(_msgSender() == offer.token.ownerOf(offer.tokenId), "only token owner can reject offer");
 
-        // Remove the offer from storage and refund the offerer.
-        address offerer = offer.offerer;
-        uint128 amount = offer.amount;
+        // Transfer the offer amount to the offerer's reward balance.
+        _config.rewardManager.depositPersonalReward{value: offer.amount}(offer.offerer);
 
         // Remove the offer from storage.
         _offers.removeOffer(offerId);
-
-        // Refund the offerer.
-        payable(offerer).sendValue(amount);
 
         // Notify the world that the offer was rejected.
         emit OfferRejected(offerId);
@@ -744,6 +801,31 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
 
         // Deposit the remainder of the payment to the seller's reward balance.
         _config.rewardManager.depositPersonalReward{value: price - minterCut - developerCut}(seller);
+    }
+
+    /**
+     * @notice Refunds the highest bidder for an auction.
+     * @param listingId The id of the listing.
+     * @param listing The listing.
+     */
+    function _refundHighestBid(
+        uint256 listingId,
+        Listings.Listing storage listing
+    ) internal {
+        if (listing.highestBidder != address(0)) {
+            _config.rewardManager.depositPersonalReward{value: listing.highestBid}(listing.highestBidder);
+            emit BidRefunded(listingId, listing.highestBidder, listing.highestBid);
+        }
+    }
+
+    /**
+     * @notice Calculates the time that the auction concludes. Auctions will automatically be extended when the
+     * contract is paused and unpaused.
+     */
+    function _getAuctionEndTime(
+        Listings.Listing storage listing
+    ) internal view returns (uint256) {
+        return listing.createdAt + listing.duration - (_pauseMetrics.totalDuration - listing.pauseDurationAtCreation);
     }
 
 }
