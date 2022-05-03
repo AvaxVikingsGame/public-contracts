@@ -2,8 +2,8 @@
 pragma solidity ^0.8.9;
 
 import "@openzeppelin/contracts-upgradeable/utils/CountersUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/math/SafeCastUpgradeable.sol";
 
+import "../libraries/SafeCastExtended.sol";
 import "../interfaces/IERC721Mintable.sol";
 
 /**
@@ -13,9 +13,9 @@ import "../interfaces/IERC721Mintable.sol";
  */
 library Listings {
     using CountersUpgradeable for CountersUpgradeable.Counter;
-    using SafeCastUpgradeable for uint256;
+    using SafeCastExtended for uint256;
 
-    uint256 constant private PRECISION_SCALAR = 1000;
+    uint32 constant private PRECISION_SCALAR = 1000;
 
     /**
      * @dev The different types of listing.
@@ -31,12 +31,10 @@ library Listings {
      * @dev Data for an individual listing.
      */
     struct Listing {
+        // The unique identifier of the token.
+        uint48 tokenId;
         // The type of token that is listed.
         IERC721Mintable token;
-        // The unique identifier of the token.
-        uint256 tokenId;
-        // The address that created the listing.
-        address seller;
         // The unix timestamp of the block the listing was created on (in seconds).
         uint64 createdAt;
         // [Auctions Only]: The duration of the listing (in seconds).
@@ -45,6 +43,8 @@ library Listings {
         uint128 startingPrice;
         // The ending price (Dutch Auctions), or the buyout price (Fixed price, English auction) if present.
         uint128 buyoutOrEndingPrice;
+        // The address that created the listing.
+        address seller;
         // The address with the highest bid (English Auctions only)
         address highestBidder;
         // The current highest bid (English Auctions only)
@@ -52,7 +52,7 @@ library Listings {
         // The type of listing.
         ListingType listingType;
         // How long the contract was paused at the time the listing was created.
-        uint256 pauseDurationAtCreation;
+        uint32 pauseDurationAtCreation;
     }
 
     /**
@@ -62,9 +62,9 @@ library Listings {
         // The counter for generating unique listing ids.
         CountersUpgradeable.Counter idCounter;
         // Maps a token to its listing id, or zero if the listing does not exist.
-        mapping(IERC721Mintable => mapping(uint256 => uint256)) indices;
+        mapping(IERC721Mintable => mapping(uint48 => uint48)) indices;
         // Maps a listing ID to the listing.
-        mapping(uint256 => Listing) listings;
+        mapping(uint48 => Listing) listings;
     }
 
     /**
@@ -78,11 +78,11 @@ library Listings {
     function addFixedPriceListing(
         Data storage self,
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         address seller,
-        uint128 currentPauseDuration,
+        uint32 currentPauseDuration,
         uint128 price
-    ) internal returns (uint256) {
+    ) internal returns (uint48) {
         require(price > 0, "no price provided");
 
         return _addListing(
@@ -112,16 +112,16 @@ library Listings {
     function addDutchAuctionListing(
         Data storage self,
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         address seller,
-        uint128 currentPauseDuration,
+        uint32 currentPauseDuration,
         uint128 startingPrice,
         uint128 endingPrice,
         uint32 duration
-    ) internal returns (uint256) {
-        require(startingPrice > endingPrice, "starting price must exceed ending price");
-        require(endingPrice > 0, "no ending price provided");
-        require(duration > 0, "no duration provided");
+    ) internal returns (uint48) {
+        require(startingPrice > endingPrice, "invalid price range");
+        require(endingPrice > 0, "invalid ending price");
+        require(duration > 0, "invalid duration");
 
         return _addListing(
             self,
@@ -150,16 +150,16 @@ library Listings {
     function addEnglishAuctionListing(
         Data storage self,
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         address seller,
-        uint128 currentPauseDuration,
+        uint32 currentPauseDuration,
         uint128 startingPrice,
         uint128 buyoutPrice,
         uint32 duration
-    ) internal returns (uint256) {
-        require(startingPrice > 0, "no starting price provided");
-        require(buyoutPrice == 0 || buyoutPrice > startingPrice, "buyout price must exceed starting price");
-        require(duration > 0, "no duration provided");
+    ) internal returns (uint48) {
+        require(startingPrice > 0, "invalid starting price");
+        require(buyoutPrice == 0 || buyoutPrice > startingPrice, "invalid buyout price");
+        require(duration > 0, "invalid duration");
 
         return _addListing(
             self,
@@ -182,7 +182,7 @@ library Listings {
      */
     function removeListing(
         Data storage self,
-        uint256 listingId
+        uint48 listingId
     ) internal {
         Listing storage listing = get(self, listingId);
         _removeListing(self, listing.token, listing.tokenId, listingId);
@@ -195,7 +195,7 @@ library Listings {
      */
     function tryRemoveListing(
         Data storage self,
-        uint256 listingId
+        uint48 listingId
     ) internal returns (bool) {
         (bool success, Listing storage listing) = tryGet(self, listingId);
         if (success) {
@@ -211,7 +211,7 @@ library Listings {
      */
     function exists(
         Data storage self,
-        uint256 listingId
+        uint48 listingId
     ) internal view returns (bool) {
         return self.listings[listingId].listingType != ListingType.Unlisted;
     }
@@ -225,7 +225,7 @@ library Listings {
     function exists(
         Data storage self,
         IERC721Mintable token,
-        uint256 tokenId
+        uint48 tokenId
     ) internal view returns (bool) {
         return exists(self, self.indices[token][tokenId]);
     }
@@ -238,7 +238,7 @@ library Listings {
      */
     function get(
         Data storage self,
-        uint256 listingId
+        uint48 listingId
     ) internal view returns (Listing storage) {
         Listing storage listing = self.listings[listingId];
         require(listing.listingType != ListingType.Unlisted, "nonexistent listing");
@@ -255,7 +255,7 @@ library Listings {
     function get(
         Data storage self,
         IERC721Mintable token,
-        uint256 tokenId
+        uint48 tokenId
     ) internal view returns (Listing storage) {
         return get(self, self.indices[token][tokenId]);
     }
@@ -267,7 +267,7 @@ library Listings {
      */
     function tryGet(
         Data storage self,
-        uint256 listingId
+        uint48 listingId
     ) internal view returns (bool, Listing storage) {
         Listing storage listing = self.listings[listingId];
         return (listing.listingType != ListingType.Unlisted, listing);
@@ -282,7 +282,7 @@ library Listings {
     function tryGet(
         Data storage self,
         IERC721Mintable token,
-        uint256 tokenId
+        uint48 tokenId
     ) internal view returns (bool, Listing storage) {
         return tryGet(self, self.indices[token][tokenId]);
     }
@@ -294,12 +294,12 @@ library Listings {
      */
     function getBuyPrice(
         Data storage self,
-        uint256 listingId
-    ) internal view returns (uint256) {
+        uint48 listingId
+    ) internal view returns (uint128) {
         Listing storage listing = get(self, listingId);
         if (listing.listingType == ListingType.DutchAuction) {
             // Calculate the percentage of the auction that has finished so far.
-            uint256 alpha = ((block.timestamp - listing.createdAt) * PRECISION_SCALAR) / listing.duration;
+            uint128 alpha = ((block.timestamp.toUint128() - listing.createdAt) * PRECISION_SCALAR) / listing.duration;
             // Linearly interpolate between the starting and ending prices, then normalize the result to get the real price. 
             return (listing.startingPrice - ((listing.startingPrice - listing.buyoutOrEndingPrice) * alpha)) / PRECISION_SCALAR;
         } else {
@@ -313,9 +313,9 @@ library Listings {
      */
     function _generateNextId(
         Data storage self
-    ) private returns (uint256) {
+    ) private returns (uint48) {
         self.idCounter.increment();
-        return self.idCounter.current();
+        return self.idCounter.current().toUint48();
     }
 
     /**
@@ -332,19 +332,19 @@ library Listings {
         Data storage self,
         ListingType listingType,
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         address seller,
-        uint128 currentPauseDuration,
+        uint32 currentPauseDuration,
         uint32 duration,
         uint128 startingPrice,
         uint128 buyoutOrEndingPrice
-    ) private returns (uint256) {
+    ) private returns (uint48) {
         require(!exists(self, token, tokenId), "token is already listed");
         require(seller != address(0), "seller cannot be zero-address");
         require(seller == token.ownerOf(tokenId), "seller must own token");
 
         // Generate a unique identifier for the listing.
-        uint256 listingId = _generateNextId(self);
+        uint48 listingId = _generateNextId(self);
 
         // Write the listing to storage.
         self.indices[token][tokenId] = listingId;
@@ -376,8 +376,8 @@ library Listings {
     function _removeListing(
         Data storage self,
         IERC721Mintable token,
-        uint256 tokenId,
-        uint256 listingId
+        uint48 tokenId,
+        uint48 listingId
     ) private {
         delete self.indices[token][tokenId];
         delete self.listings[listingId];

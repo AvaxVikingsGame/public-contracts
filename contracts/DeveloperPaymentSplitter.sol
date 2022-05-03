@@ -10,6 +10,7 @@ import "@openzeppelin/contracts/finance/PaymentSplitter.sol";
  */
 contract DeveloperPaymentSplitter is PaymentSplitter {
 
+    // solhint-disable-next-line no-empty-blocks
     constructor(address[] memory payees, uint256[] memory shares) PaymentSplitter(payees, shares) {}
 
 }

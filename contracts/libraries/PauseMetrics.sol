@@ -13,9 +13,9 @@ library PauseMetrics {
 
     struct Data {
         // The unix timestamp of the time the contract was paused.
-        uint128 lastPauseTimestamp;
+        uint64 lastPauseTimestamp;
         // The total amount of time that this contract has been paused (in seconds).
-        uint128 totalDuration;
+        uint32 totalDuration;
     }
 
     /**
@@ -26,7 +26,7 @@ library PauseMetrics {
         PauseMetrics.Data storage self
     ) internal {
         require(!isPaused(self), "already paused");
-        self.lastPauseTimestamp = block.timestamp.toUint128();
+        self.lastPauseTimestamp = block.timestamp.toUint32();
     }
 
     /**
@@ -37,7 +37,7 @@ library PauseMetrics {
     ) internal {
         require(isPaused(self), "already unpaused");
         require(self.lastPauseTimestamp != 0, "already unpaused");
-        self.totalDuration = (block.timestamp - self.lastPauseTimestamp).toUint128();
+        self.totalDuration = (block.timestamp - self.lastPauseTimestamp).toUint32();
         self.lastPauseTimestamp = 0;
     }
 

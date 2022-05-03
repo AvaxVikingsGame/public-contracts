@@ -10,6 +10,8 @@ import "@openzeppelin/contracts-upgradeable/utils/CountersUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/introspection/ERC165CheckerUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/structs/EnumerableMapUpgradeable.sol";
 
+import "../libraries/SafeCastExtended.sol";
+
 import "../interfaces/IERC721Mintable.sol";
 import "../interfaces/IRewardManager.sol";
 
@@ -23,13 +25,14 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
     using CountersUpgradeable for CountersUpgradeable.Counter;
     using EnumerableMapUpgradeable for EnumerableMapUpgradeable.UintToAddressMap;
     using ERC165CheckerUpgradeable for address;
+    using SafeCastExtended for uint256;
 
     /**
      * @dev Configuration properties.
      */
     struct Config {
         // The cost to mint a Viking.
-        uint256 mintFee;
+        uint128 mintFee;
         // The wallet to send developer payments to.
         address developerWallet;
         // The shared reward rate.
@@ -44,7 +47,7 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
     uint256 private constant RATE_PRECISION_SCALAR = 1_000;
 
     // Base URI for token metadata.
-    string private constant BASE_TOKEN_URI = "https://api.cryptovikings.art/viking/";
+    string private constant BASE_TOKEN_URI = "https://api.cryptovikings.art/token/viking/";
 
     // The maximum supply of Vikings that can ever be minted.
     uint256 public constant MAX_SUPPLY = 10_000;
@@ -64,8 +67,8 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
      * @param newMintFee The new mint fee.
      */
     event MintFeeChanged(
-        uint256 oldMintFee,
-        uint256 newMintFee
+        uint128 oldMintFee,
+        uint128 newMintFee
     );
 
     /**
@@ -74,8 +77,8 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
      * @param newRewardRate The new reward rate.
      */
     event RewardRateChanged(
-        uint256 oldRewardRate,
-        uint256 newRewardRate
+        uint16 oldRewardRate,
+        uint16 newRewardRate
     );
 
     /**
@@ -116,8 +119,8 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
      */
     event Minted(
         address indexed minter,
-        uint256 indexed tokenId,
-        uint256 price
+        uint48 indexed tokenId,
+        uint128 price
     );
 
     function initialize(
@@ -130,6 +133,7 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
         __CryptoVikings_init_unchained(developerWallet);
     }
 
+    // solhint-disable-next-line func-name-mixedcase
     function __CryptoVikings_init_unchained(
         address developerWallet
     ) internal onlyInitializing {
@@ -160,9 +164,9 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
      * @param mintFee The new mint fee, must be non-zero.
      */
     function setMintFee(
-        uint256 mintFee
+        uint128 mintFee
     ) public onlyOwner {
-        require(mintFee > 0, "mint fee must be positive");
+        require(mintFee > 0, "invalid mint fee");
 
         emit MintFeeChanged(_config.mintFee, mintFee);
         _config.mintFee = mintFee;
@@ -188,7 +192,7 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
     function setRewardManager(
         IRewardManager rewardManager
     ) public onlyOwner {
-        require(address(rewardManager).supportsInterface(type(IRewardManager).interfaceId));
+        require(address(rewardManager).supportsInterface(type(IRewardManager).interfaceId), "invalid reward manager");
 
         emit RewardManagerChanged(_config.rewardManager, rewardManager);
         _config.rewardManager = rewardManager;
@@ -201,7 +205,7 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
     function setDeveloperWallet(
         address developerWallet
     ) public onlyOwner {
-        require(developerWallet != address(0), "developer wallet cannot be zero-address");
+        require(developerWallet != address(0), "invalid developer wallet");
 
         emit DeveloperWalletChanged(_config.developerWallet, developerWallet);
         _config.developerWallet = developerWallet;
@@ -214,7 +218,7 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
     function setMaxMintsPerTransaction(
         uint8 maxMintsPerTransaction
     ) public onlyOwner {
-        require(maxMintsPerTransaction > 0, "bad max mints");
+        require(maxMintsPerTransaction > 0, "invalid max mints");
 
         emit MaxMintsPerTransactionChanged(_config.maxMintsPerTransaction, maxMintsPerTransaction);
         _config.maxMintsPerTransaction = maxMintsPerTransaction;
@@ -223,7 +227,7 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
     /**
      * @notice Gets the current mint fee.
      */
-    function getMintFee() external view returns (uint256) {
+    function getMintFee() external view returns (uint128) {
         return _config.mintFee;
     }
 
@@ -242,7 +246,7 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
     }
 
     /**
-     * @notice Unpauses contract functioanlity.
+     * @notice Unpauses contract functionality.
      */
     function unpause() external onlyOwner {
         _unpause();
@@ -277,17 +281,17 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
      */
     function mint(
         address minter,
-        uint256 amount
+        uint8 amount
     ) external payable whenNotPaused {
         require(totalSupply() + amount <= MAX_SUPPLY, "exceeds supply");
         require(amount > 0 && amount <= _config.maxMintsPerTransaction, "bad mint amount");
 
         // Owner can mint Vikings for free for promos.
-        uint256 price = (_msgSender() == owner()) ? 0 : amount * _config.mintFee;
+        uint128 price = (_msgSender() == owner()) ? 0 : amount * _config.mintFee;
         require(msg.value == price, "wrong amount paid");
 
         // Mint each of the vikings and initialize them with the reward manager.
-        for (uint256 i = 0; i < amount; i++) {
+        for (uint8 i = 0; i < amount; i++) {
             // Generates the next token id, starting at #1.
             _tokenIdCounter.increment();
 
@@ -296,7 +300,7 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
 
             _minters.set(tokenId, minter);
 
-            emit Minted(minter, tokenId, price / amount);
+            emit Minted(minter, tokenId.toUint48(), price / amount);
 
             _config.rewardManager.initializeToken(tokenId);
         }
@@ -309,6 +313,23 @@ contract CryptoVikings is OwnableUpgradeable, PausableUpgradeable, ERC721Enumera
             // Transfer the remaining mint fee to the developers.
             payable(_config.developerWallet).sendValue(msg.value - rewardAmount);
         }
+    }
+
+    /**
+     * @notice Gets the list of tokens owned by the specified address.
+     * @param owner The address to get the owned tokens of.
+     */
+    function getTokensForOwner(
+        address owner
+    ) external view returns (uint48[] memory) {
+        uint256 balance = balanceOf(owner);
+
+        uint48[] memory tokens = new uint48[](balance);
+        for (uint256 i = 0; i < balance; i++) {
+            tokens[i] = tokenOfOwnerByIndex(owner, i).toUint48();
+        }
+
+        return tokens;
     }
 
 }

@@ -63,6 +63,7 @@ contract RewardManager is OwnableUpgradeable, ERC165Upgradeable, IRewardManager 
         __RewardsManager_init_unchained(token);
     }
 
+    // solhint-disable-next-line func-name-mixedcase
     function __RewardsManager_init_unchained(
         IERC721EnumerableUpgradeable token
     ) internal onlyInitializing {

@@ -2,8 +2,8 @@
 pragma solidity ^0.8.9;
 
 import "@openzeppelin/contracts-upgradeable/utils/CountersUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/math/SafeCastUpgradeable.sol";
 
+import "../libraries/SafeCastExtended.sol";
 import "../interfaces/IERC721Mintable.sol";
 
 /**
@@ -13,7 +13,7 @@ import "../interfaces/IERC721Mintable.sol";
  */
 library Offers {
     using CountersUpgradeable for CountersUpgradeable.Counter;
-    using SafeCastUpgradeable for uint256;
+    using SafeCastExtended for uint256;
     
     /**
      * @dev Represents an individual offer made on a token.
@@ -22,7 +22,7 @@ library Offers {
         // The token the offer was made on.
         IERC721Mintable token;
         // The id of the token the offer was made on.
-        uint256 tokenId;
+        uint48 tokenId;
         // The address that made the offer.
         address offerer;
         // The amount that was offered.
@@ -33,9 +33,9 @@ library Offers {
         // Generates unique identifiers for each offer.
         CountersUpgradeable.Counter idCounter;
         // Maps a token/offerer pair to the offer's id.
-        mapping(IERC721Mintable => mapping(uint256 => mapping(address => uint256))) indices;
+        mapping(IERC721Mintable => mapping(uint48 => mapping(address => uint48))) indices;
         // Maps an offer's id to the offer data.
-        mapping(uint256 => Offer) offers;
+        mapping(uint48 => Offer) offers;
     }
 
     /**
@@ -49,17 +49,17 @@ library Offers {
     function addOffer(
         Data storage self,
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         address offerer,
         uint128 amount
-    ) internal returns (uint256) {
+    ) internal returns (uint48) {
         require(!exists(self, token, tokenId, offerer), "offer already exists");
         require(token.ownerOf(tokenId) != address(0), "token does not exist");
         require(offerer != address(0), "offerer cannot be zero-address");
         require(amount > 0, "no amount offered");
 
         // Generate a unique identifier for the listing.
-        uint256 offerId = _generateNextId(self);
+        uint48 offerId = _generateNextId(self);
 
         // Write the offer to storage.
         self.indices[token][tokenId][offerer] = offerId;
@@ -82,7 +82,7 @@ library Offers {
      */
     function removeOffer(
         Data storage self,
-        uint256 offerId
+        uint48 offerId
     ) internal {
         Offer storage offer = get(self, offerId);
         _removeOffer(self, offerId, offer.token, offer.tokenId, offer.offerer);
@@ -95,7 +95,7 @@ library Offers {
      */
     function tryRemoveOffer(
         Data storage self,
-        uint256 offerId
+        uint48 offerId
     ) internal returns (bool) {
         (bool success, Offer storage offer) = tryGet(self, offerId);
         if (success) {
@@ -111,7 +111,7 @@ library Offers {
      */
     function exists(
         Data storage self,
-        uint256 offerId
+        uint48 offerId
     ) internal view returns (bool) {
         return self.offers[offerId].offerer != address(0);
     }
@@ -126,7 +126,7 @@ library Offers {
     function exists(
         Data storage self,
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         address offerer
     ) internal view returns (bool) {
         return exists(self, self.indices[token][tokenId][offerer]);
@@ -140,7 +140,7 @@ library Offers {
      */
     function get(
         Data storage self,
-        uint256 offerId
+        uint48 offerId
     ) internal view returns (Offer storage) {
         Offer storage offer = self.offers[offerId];
         require(offer.offerer != address(0), "nonexistent offer");
@@ -158,7 +158,7 @@ library Offers {
     function get(
         Data storage self,
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         address offerer
     ) internal view returns (Offer storage) {
         return get(self, self.indices[token][tokenId][offerer]);
@@ -171,7 +171,7 @@ library Offers {
      */
     function tryGet(
         Data storage self,
-        uint256 offerId
+        uint48 offerId
     ) internal view returns (bool, Offer storage) {
         Offer storage offer = self.offers[offerId];
         return (offer.offerer != address(0), offer);
@@ -186,7 +186,7 @@ library Offers {
     function tryGet(
         Data storage self,
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         address offerer
     ) internal view returns (bool, Offer storage) {
         return tryGet(self, self.indices[token][tokenId][offerer]);
@@ -198,9 +198,9 @@ library Offers {
      */
     function _generateNextId(
         Data storage self
-    ) private returns (uint256) {
+    ) private returns (uint48) {
         self.idCounter.increment();
-        return self.idCounter.current();
+        return self.idCounter.current().toUint48();
     }
 
     /**
@@ -213,9 +213,9 @@ library Offers {
      */
     function _removeOffer(
         Data storage self,
-        uint256 offerId,
+        uint48 offerId,
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         address offerer
     ) private {
         delete self.indices[token][tokenId][offerer];

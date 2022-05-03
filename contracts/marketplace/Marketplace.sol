@@ -8,12 +8,12 @@ import "@openzeppelin/contracts-upgradeable/token/ERC721/utils/ERC721HolderUpgra
 import "@openzeppelin/contracts-upgradeable/utils/AddressUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/CountersUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/introspection/ERC165CheckerUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/math/SafeCastUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/structs/EnumerableSetUpgradeable.sol";
 
 import "../interfaces/IERC721Mintable.sol";
 import "../interfaces/IRewardManager.sol";
 
+import "../libraries/SafeCastExtended.sol";
 import "../libraries/PauseMetrics.sol";
 import "./Listings.sol";
 import "./Offers.sol";
@@ -26,7 +26,7 @@ import "./Offers.sol";
 contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpgradeable {
     using AddressUpgradeable for address payable;
     using CountersUpgradeable for CountersUpgradeable.Counter;
-    using SafeCastUpgradeable for uint256;
+    using SafeCastExtended for uint256;
     using EnumerableSetUpgradeable for EnumerableSetUpgradeable.AddressSet;
     using EnumerableSetUpgradeable for EnumerableSetUpgradeable.UintSet;
     using ERC165CheckerUpgradeable for address;
@@ -53,11 +53,11 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         // How much to extend auctions by when a bid is placed with less than this much time remaining.
         uint16 bidExtensionTime;
         // The minimum percentage that a bid must increase by (0.1% precision).
-        uint16 minBidIncrease;
+        uint16 minBidIncreaseRate;
     }
 
     // The precision scalar for rate calculations (1000 = 0.1% precision)
-    uint256 private constant PRECISION_SCALAR = 1000;
+    uint32 private constant PRECISION_SCALAR = 1000;
 
     // The configuration instance.
     Config private _config;
@@ -80,8 +80,8 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param newMinterRate The new minter rate (0.1% precision).
      */
     event MinterRateChanged(
-        uint256 oldMinterRate,
-        uint256 newMinterRate
+        uint16 oldMinterRate,
+        uint16 newMinterRate
     );
 
     /**
@@ -90,22 +90,32 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param newDeveloperRate The new developer rate (0.1% precision).
      */
     event DeveloperRateChanged(
-        uint256 oldDeveloperRate,
-        uint256 newDeveloperRate
+        uint16 oldDeveloperRate,
+        uint16 newDeveloperRate
     );
 
     /**
      * @notice Emitted when the valid auction duration range changes.
      * @param oldMinimumAuctionDuration The old minimum auction duration.
-     * @param oldMinimumAuctionDuration The old maximum auction duration.
+     * @param oldMinimumAuctionDuration The old maximum auction duration. 
      * @param newMinimumAuctionDuration The new maximum auction duration.
      * @param newMaximumAuctionDuration The new maximum auction duration.
      */
     event ValidDurationRangeChanged(
-        uint256 oldMinimumAuctionDuration,
-        uint256 oldMaximumAuctionDuration,
-        uint256 newMinimumAuctionDuration,
-        uint256 newMaximumAuctionDuration
+        uint32 oldMinimumAuctionDuration,
+        uint32 oldMaximumAuctionDuration,
+        uint32 newMinimumAuctionDuration,
+        uint32 newMaximumAuctionDuration
+    );
+
+    /**
+     * @notice Emitted whenever the bid extension time changes.
+     * @param oldBidExtensionTime The old bid extension time.
+     * @param newBidExtensionTime The new bid extension time.
+     */
+    event BidExtensionTimeChanged(
+        uint16 oldBidExtensionTime,
+        uint16 newBidExtensionTime
     );
 
     /**
@@ -113,9 +123,9 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param oldMinimumBidIncrease The old minimum bid increase.
      * @param newMinimumBidIncrease The new minimum bid increase.
      */
-    event MinimumBidIncreaseChanged(
-        uint32 oldMinimumBidIncrease,
-        uint32 newMinimumBidIncrease
+    event MinimumBidIncreaseRateChanged(
+        uint16 oldMinimumBidIncrease,
+        uint16 newMinimumBidIncrease
     );
 
     /**
@@ -163,11 +173,12 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param price The asking price.
      */
     event FixedPriceListingCreated(
-        uint256 indexed listingId,
+        uint48 indexed listingId,
         IERC721Mintable indexed token,
-        uint256 indexed tokenId,
+        uint48 indexed tokenId,
         address seller,
-        uint256 price
+        uint128 price,
+        uint32 pauseDurationAtCreation
     );
 
     /**
@@ -181,13 +192,13 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param duration How long the auction will run for (in seconds).
      */
     event DutchAuctionListingCreated(
-        uint256 indexed listingId,
+        uint48 indexed listingId,
         IERC721Mintable indexed token,
-        uint256 indexed tokenId,
+        uint48 indexed tokenId,
         address seller,
-        uint256 startingPrice,
-        uint256 endingPrice,
-        uint256 duration
+        uint128 startingPrice,
+        uint128 endingPrice,
+        uint32 duration
     );
 
     /**
@@ -201,13 +212,14 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param duration How long the auction will run for (in seconds).
      */
     event EnglishAuctionListingCreated(
-        uint256 indexed listingId,
+        uint48 indexed listingId,
         IERC721Mintable indexed token,
-        uint256 indexed tokenId,
+        uint48 indexed tokenId,
         address seller,
-        uint256 startingPrice,
-        uint256 buyoutPrice,
-        uint256 duration
+        uint128 startingPrice,
+        uint128 buyoutPrice,
+        uint32 duration,
+        uint32 pauseDurationAtCreation
     );
 
     /**
@@ -215,7 +227,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param listingId The unique identifier for the listing.
      */
     event ListingCancelled(
-        uint256 indexed listingId
+        uint48 indexed listingId
     );
 
     /**
@@ -225,9 +237,9 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param price The amount that the token sold for.
      */
     event ListingSuccessful(
-        uint256 indexed listingId,
+        uint48 indexed listingId,
         address buyer,
-        uint256 price
+        uint128 price
     );
 
     /**
@@ -237,9 +249,9 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param amount The amount that was bid.
      */
     event BidCreated(
-        uint256 indexed listingId,
+        uint48 indexed listingId,
         address bidder,
-        uint256 amount
+        uint128 amount
     );
 
     /**
@@ -248,9 +260,9 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param bidder The address that created the bid.
      */
     event BidRefunded(
-        uint256 indexed listingId,
+        uint48 indexed listingId,
         address bidder,
-        uint256 amount
+        uint128 amount
     );
 
     /**
@@ -262,18 +274,18 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param amount The amount that was offered.
      */
     event OfferCreated(
-        uint256 indexed offerId,
+        uint48 indexed offerId,
         IERC721Mintable indexed token,
-        uint256 indexed tokenId,
+        uint48 indexed tokenId,
         address offerer,
-        uint256 amount
+        uint128 amount
     );
 
     /**
      * @notice Emitted when an existing offer is updated.
      */
     event OfferUpdated(
-        uint256 indexed offerId,
+        uint48 indexed offerId,
         uint128 newAmount
     );
 
@@ -282,7 +294,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param offerId The unique identifier for the offer.
      */
     event OfferCancelled(
-        uint256 indexed offerId
+        uint48 indexed offerId
     );
 
     /**
@@ -290,7 +302,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param offerId The unique identifier for the offer.
      */
     event OfferAccepted(
-        uint256 indexed offerId
+        uint48 indexed offerId
     );
 
     /**
@@ -298,7 +310,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param offerId The unique identifier for the offer.
      */
     event OfferRejected(
-        uint256 indexed offerId
+        uint48 indexed offerId
     );
 
     /**
@@ -319,7 +331,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      */
     modifier onlyUnlisted(
         IERC721Mintable token,
-        uint256 tokenId
+        uint48 tokenId
     ) {
         require(!_listings.exists(token, tokenId), "token already listed");
         _;
@@ -338,14 +350,15 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         __Marketplace_init_unchained(developerWallet, rewardManager);
     }
 
+    // solhint-disable-next-line func-name-mixedcase
     function __Marketplace_init_unchained(
         address developerWallet,
         IRewardManager rewardManager
     ) internal onlyInitializing {
-        setSalesRates(20, 30);
-        setValidDurationRange(30 minutes, 14 days);
         setDeveloperWallet(developerWallet);
         setRewardManager(rewardManager);
+        setSalesRates(20, 30);
+        setValidDurationRange(30 minutes, 14 days);
     }
 
     /**
@@ -402,6 +415,29 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
     }
 
     /**
+     * @notice Sets the bid extension time.
+     * @param bidExtensionTime The bid extension time (in seconds).
+     */
+    function setBidExtensionTime(
+        uint16 bidExtensionTime
+    ) public onlyOwner {
+        emit BidExtensionTimeChanged(_config.bidExtensionTime, bidExtensionTime);
+        _config.bidExtensionTime = bidExtensionTime;
+    }
+
+    /**
+     * @notice Sets the minimum bid increase rate.
+     */
+    function setMinimumBidIncreaseRate(
+        uint16 minBidIncreaseRate
+    ) public onlyOwner {
+        require (minBidIncreaseRate > 0 && minBidIncreaseRate <= PRECISION_SCALAR, "invalid rate");
+
+        emit MinimumBidIncreaseRateChanged(_config.minBidIncreaseRate, minBidIncreaseRate);
+        _config.minBidIncreaseRate = minBidIncreaseRate;
+    }
+
+    /**
      * @notice Sets the developer wallet.
      * @param developerWallet The new developer wallet.
      */
@@ -422,7 +458,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
     function setRewardManager(
         IRewardManager rewardManager
     ) public onlyOwner {
-        require(address(rewardManager).supportsInterface(type(IRewardManager).interfaceId));
+        require(address(rewardManager).supportsInterface(type(IRewardManager).interfaceId), "not a valid reward manager");
         require(rewardManager != _config.rewardManager, "same address");
 
         emit RewardManagerChanged(_config.rewardManager, rewardManager);
@@ -459,7 +495,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      */
     function createFixedPriceListing(
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         uint128 price
     ) external
         whenNotPaused
@@ -468,14 +504,14 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         require(price > 0, "no price provided");
 
         // Write the listing to storage. This will fail if the listing already exists.
-        uint256 listingId = _listings.addFixedPriceListing(token, tokenId, _msgSender(), _pauseMetrics.totalDuration, price);
+        uint48 listingId = _listings.addFixedPriceListing(token, tokenId, _msgSender(), _pauseMetrics.totalDuration, price);
 
         // Transfer ownership of the token to the marketplace. The sender must own the token, and the
         // marketplace must be approved to transfer the token, otherwise this will fail.
         token.safeTransferFrom(_msgSender(), address(this), tokenId);
 
         // Notify the world that a new listing was created.
-        emit FixedPriceListingCreated(listingId, token, tokenId, _msgSender(), price);
+        emit FixedPriceListingCreated(listingId, token, tokenId, _msgSender(), price, _pauseMetrics.totalDuration);
     }
 
     /**
@@ -488,7 +524,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      */
     function createDutchAuctionListing(
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         uint128 startingPrice,
         uint128 endingPrice,
         uint32 duration
@@ -496,12 +532,15 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         whenNotPaused
         onlyWhitelisted(token)
     {
+        if (true) {
+            revert("Auctions are not yet available.");
+        }
         require(endingPrice > 0, "ending price is zero");
-        require(startingPrice > endingPrice, "start price must be greater than ending price");
+        require(startingPrice > endingPrice, "starting price <= ending price");
         require(duration >= _config.minValidDuration && duration <= _config.maxValidDuration, "bad auction duration");
 
         // Write the listing to storage. This will fail if the listing already exists.
-        uint256 listingId = _listings.addDutchAuctionListing(token, tokenId, _msgSender(), _pauseMetrics.totalDuration, startingPrice, endingPrice, duration);
+        uint48 listingId = _listings.addDutchAuctionListing(token, tokenId, _msgSender(), _pauseMetrics.totalDuration, startingPrice, endingPrice, duration);
 
         // Transfer ownership of the token to the marketplace. The sender must own the token, and the
         // marketplace must be approved to transfer the token, otherwise this will fail.
@@ -521,7 +560,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      */
     function createEnglishAuctionListing(
         IERC721Mintable token,
-        uint256 tokenId,
+        uint48 tokenId,
         uint128 startingPrice,
         uint128 buyoutPrice,
         uint32 duration
@@ -529,19 +568,22 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         whenNotPaused
         onlyWhitelisted(token)
     {
+        if (true) {
+            revert("Auctions are not yet available.");
+        }
         require(startingPrice > 0, "starting price cannot be 0");
         require(buyoutPrice == 0 || buyoutPrice > startingPrice, "bad buyout price");
         require(duration >= _config.minValidDuration && duration <= _config.maxValidDuration, "bad auction duration");
 
         // Write the listing to storage. This will fail if the listing already exists.
-        uint256 listingId = _listings.addEnglishAuctionListing(token, tokenId, _msgSender(), _pauseMetrics.totalDuration, startingPrice, buyoutPrice, duration);
+        uint48 listingId = _listings.addEnglishAuctionListing(token, tokenId, _msgSender(), _pauseMetrics.totalDuration, startingPrice, buyoutPrice, duration);
 
         // Transfer ownership of the token to the marketplace. The sender must own the token, and the
         // marketplace must be approved to transfer the token, otherwise this will fail.
         token.safeTransferFrom(_msgSender(), address(this), tokenId);
 
         // Notify the world that an English auction was created.
-        emit EnglishAuctionListingCreated(listingId, token, tokenId, _msgSender(), startingPrice, buyoutPrice, duration);
+        emit EnglishAuctionListingCreated(listingId, token, tokenId, _msgSender(), startingPrice, buyoutPrice, duration, _pauseMetrics.totalDuration);
     }
 
     /**
@@ -549,7 +591,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param listingId The id of the listing to cancel.
      */
     function cancelListing(
-        uint256 listingId
+        uint48 listingId
     ) external
         whenNotPaused
     {
@@ -572,7 +614,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param listingId The id of the listing to buy.
      */
     function buy(
-        uint256 listingId
+        uint48 listingId
     ) public payable
         whenNotPaused
     {
@@ -586,7 +628,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         }
 
         // Gets the buy price for the token.
-        uint256 price = _listings.getBuyPrice(listingId);
+        uint128 price = _listings.getBuyPrice(listingId);
         require(price != 0, "listing has no buyout price");
         require(msg.value >= price, "not enough paid");
 
@@ -608,7 +650,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         }
 
         // Notify the world that the listing was successful.
-        emit ListingSuccessful(listingId, _msgSender(), msg.value);
+        emit ListingSuccessful(listingId, _msgSender(), price);
     }
 
     /**
@@ -616,7 +658,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param listingId The id of the listing to bid on.
      */
     function createBid(
-        uint256 listingId
+        uint48 listingId
     ) external payable
         whenNotPaused
     {
@@ -635,9 +677,9 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         require(block.timestamp < auctionEndTime, "auction has concluded");
 
         // Calculate the minimum required bid.
-        uint256 minAcceptedBid = listing.startingPrice;
+        uint128 minAcceptedBid = listing.startingPrice;
         if (listing.highestBidder != address(0)) {
-            minAcceptedBid = listing.highestBid + ((listing.highestBid * _config.minBidIncrease) / PRECISION_SCALAR);
+            minAcceptedBid = listing.highestBid + ((listing.highestBid * _config.minBidIncreaseRate) / PRECISION_SCALAR);
         }
         require(msg.value >= minAcceptedBid, "bid is too low");
 
@@ -649,7 +691,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
         listing.highestBid = msg.value.toUint128();
 
         // Notify the world that a bid was placed.
-        emit BidCreated(listingId, _msgSender(), msg.value);
+        emit BidCreated(listingId, _msgSender(), msg.value.toUint128());
     }
 
     /**
@@ -657,12 +699,12 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param listingId The id of the listing to conclude.
      */
     function concludeAuction(
-        uint256 listingId
+        uint48 listingId
     ) external
         whenNotPaused
     {
         Listings.Listing storage listing = _listings.get(listingId);
-        require(listing.listingType == Listings.ListingType.EnglishAuction, "can only conclude English auctions");
+        require(listing.listingType == Listings.ListingType.EnglishAuction, "must be English auction");
 
         uint256 auctionEndTime = _getAuctionEndTime(listing);
         require(block.timestamp >= auctionEndTime, "auction has not concluded");
@@ -695,16 +737,16 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      */
     function createOffer(
         IERC721Mintable token,
-        uint256 tokenId
+        uint48 tokenId
     ) external payable
         whenNotPaused
         onlyWhitelisted(token)
     {
         // Create the offer and write it to storage.
-        uint256 offerId = _offers.addOffer(token, tokenId, _msgSender(), msg.value.toUint128());
+        uint48 offerId = _offers.addOffer(token, tokenId, _msgSender(), msg.value.toUint128());
 
         // Notify the world that an offer was created.
-        emit OfferCreated(offerId, token, tokenId, _msgSender(), msg.value);
+        emit OfferCreated(offerId, token, tokenId, _msgSender(), msg.value.toUint128());
     }
 
     /**
@@ -712,12 +754,12 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param offerId The id of the offer to cancel.
      */
     function cancelOffer(
-        uint256 offerId
+        uint48 offerId
     ) external
         whenNotPaused
     {
         Offers.Offer storage offer = _offers.get(offerId);
-        require(_msgSender() == owner() || _msgSender() == offer.offerer, "only developer and offerer can cancel offer");
+        require(_msgSender() == owner() || _msgSender() == offer.offerer, "must be developer or offerer");
 
         // Remove the offer from storage and refund the offerer.
         address offerer = offer.offerer;
@@ -738,12 +780,12 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param offerId The id of the offer to accept.
      */
     function acceptOffer(
-        uint256 offerId
+        uint48 offerId
     ) external
         whenNotPaused
     {
         Offers.Offer storage offer = _offers.get(offerId);
-        require(_msgSender() == offer.token.ownerOf(offer.tokenId), "only token owner can accept offer");
+        require(_msgSender() == offer.token.ownerOf(offer.tokenId), "must be token owner");
 
         // Transfer the token to the offerer.
         offer.token.safeTransferFrom(_msgSender(), offer.offerer, offer.tokenId);
@@ -763,12 +805,12 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param offerId The id of the offer to accept.
      */
     function rejectOffer(
-        uint256 offerId
+        uint48 offerId
     ) external
         whenNotPaused
     {
         Offers.Offer storage offer = _offers.get(offerId);
-        require(_msgSender() == offer.token.ownerOf(offer.tokenId), "only token owner can reject offer");
+        require(_msgSender() == offer.token.ownerOf(offer.tokenId), "must be token owner");
 
         // Transfer the offer amount to the offerer's reward balance.
         _config.rewardManager.depositPersonalReward{value: offer.amount}(offer.offerer);
@@ -789,7 +831,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
     function _distributeSalePayment(
         address seller,
         address minter,
-        uint256 price
+        uint128 price
     ) internal {
         // Calculate the minter cut and deposit it to the minter's reward balance.
         uint256 minterCut = (price * _config.minterRate) / PRECISION_SCALAR;
@@ -809,7 +851,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      * @param listing The listing.
      */
     function _refundHighestBid(
-        uint256 listingId,
+        uint48 listingId,
         Listings.Listing storage listing
     ) internal {
         if (listing.highestBidder != address(0)) {
@@ -824,7 +866,7 @@ contract Marketplace is OwnableUpgradeable, PausableUpgradeable, ERC721HolderUpg
      */
     function _getAuctionEndTime(
         Listings.Listing storage listing
-    ) internal view returns (uint256) {
+    ) internal view returns (uint64) {
         return listing.createdAt + listing.duration - (_pauseMetrics.totalDuration - listing.pauseDurationAtCreation);
     }
 
